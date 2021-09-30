@@ -44,11 +44,11 @@ class SiTTModel(BaseModel):
         """
         parser.set_defaults(no_dropout=True)  # default CycleGAN did not use dropout
         if is_train:
-            parser.add_argument('--lambda_idt', type=float, default=5.0,
+            parser.add_argument('--lambda_idt', type=float, default=1.0,
                                 help='use identity mapping. Setting lambda_identity other than 0 has an effect of scaling the weight of the identity mapping loss. For example, if the weight of the identity loss should be 10 times smaller than the weight of the reconstruction loss, please set lambda_identity = 0.1')
-            parser.add_argument('--lambda_rec', type=float, default=7.0, help='weight for cycle loss (A -> B -> A)')
+            parser.add_argument('--lambda_rec', type=float, default=1.0, help='weight for cycle loss (A -> B -> A)')
             parser.add_argument('--lambda_kl', type=float, default=0.2, help='weight for cycle loss (A -> B -> A)')
-            parser.add_argument('--lambda_f', type=float, default=5.0, help='weight for cycle loss (A -> B -> A)')
+            parser.add_argument('--lambda_f', type=float, default=1.0, help='weight for cycle loss (A -> B -> A)')
 
         return parser
 
@@ -104,9 +104,9 @@ class SiTTModel(BaseModel):
             self.criterionKL = torch.nn.KLDivLoss(reduction='batchmean')
             # initialize optimizers; schedulers will be automatically created by function <BaseModel.setup>.
             self.optimizer_G = torch.optim.Adam(itertools.chain(self.netG.parameters()),
-                                                lr=opt.lr, betas=(opt.beta1, 0.999))
+                                                lr=opt.lr_G, betas=(opt.beta1, 0.999))
             self.optimizer_D = torch.optim.Adam(itertools.chain(self.netD_A.parameters(), self.netD_B.parameters()),
-                                                lr=opt.lr, betas=(opt.beta1, 0.999))
+                                                lr=opt.lr_D, betas=(opt.beta1, 0.999))
             self.optimizers.append(self.optimizer_G)
             self.optimizers.append(self.optimizer_D)
 
@@ -127,13 +127,19 @@ class SiTTModel(BaseModel):
 
     def forward(self):
         """Run forward pass; called by both functions <optimize_parameters> and <test>."""
-        self.fake_B, self.texture_B_1, self.texture_B_2 = self.netG(self.real_A, self.real_B, 'abb', True)  # G_A(A, B) - Content A + Texture B - I'B
-        self.idt_A = self.netG(self.real_A, self.real_A, 'aaa')  # IAA
-        self.rec_A = self.netG(self.fake_B, self.real_A, 'baa')  # G_B(G_A(A)) - Content I'B + Texture A - I'BA
+        self.fake_B = self.netG(self.real_A, self.real_B, 'b')  # G_A(A, B) - Content A + Texture B + Decoder B - I'B
+        self.texture_B_1 = self.netG.module.texture(self.fake_B)  #
+        self.texture_B_2 = self.netG.module.texture(self.real_B)  #
 
-        self.fake_A, self.texture_A_1, self.texture_A_2 = self.netG(self.real_B, self.real_A, 'baa', True)  # G_B(B) - Content B + Texture A - I'A
-        self.idt_B = self.netG(self.real_B, self.real_B, 'bbb')  # IAA
-        self.rec_B = self.netG(self.fake_A, self.real_B, 'abb')  # G_A(G_B(B)) - Content I'A + Texture B - I'AB
+        self.idt_A = self.netG(self.real_A, self.real_A, 'a')  # IAA checked
+        self.rec_A = self.netG(self.fake_B, self.real_A, 'a')  # G_B(G_A(A)) - Content I'B + Texture A - I'BA
+
+        self.fake_A = self.netG(self.real_B, self.real_A, 'a')  # G_B(B) - Content B + Texture A - I'A
+        self.texture_A_1 = self.netG.module.texture(self.fake_A)  #
+        self.texture_A_2 = self.netG.module.texture(self.real_A)  #
+
+        self.idt_B = self.netG(self.real_B, self.real_B, 'b')  # IAA
+        self.rec_B = self.netG(self.fake_A, self.real_B, 'b')  # G_A(G_B(B)) - Content I'A + Texture B - I'AB
 
     def backward_D_basic(self, netD, real, fake):
         """Calculate GAN loss for the discriminator
@@ -159,14 +165,13 @@ class SiTTModel(BaseModel):
 
     def backward_D_A(self):
         """Calculate GAN loss for discriminator D_A"""
-        # TODO: Insert some real_A into the fake_B_pool
-        fake_B = self.fake_B_pool.query(self.fake_B)
-        self.loss_D_A = self.backward_D_basic(self.netD_A, self.real_B, fake_B)  # judge whether B is all right
+        fake_A = self.fake_A_pool.query(self.fake_A)
+        self.loss_D_A = self.backward_D_basic(self.netD_A, self.real_A, fake_A)  # judge whether B is all right
 
     def backward_D_B(self):
         """Calculate GAN loss for discriminator D_B"""
-        fake_A = self.fake_A_pool.query(self.fake_A)
-        self.loss_D_B = self.backward_D_basic(self.netD_B, self.real_A, fake_A)  # judge whether A is all right
+        fake_B = self.fake_B_pool.query(self.fake_B)
+        self.loss_D_B = self.backward_D_basic(self.netD_B, self.real_B, fake_B)  # judge whether A is all right
 
     def backward_G(self):
         """Calculate the loss for generators G_A and G_B"""
@@ -176,13 +181,14 @@ class SiTTModel(BaseModel):
         lambda_f = self.opt.lambda_f
         # Identity loss
 
-        self.loss_idt_A = self.criterionIdt(self.idt_A, self.real_B) * lambda_idt
-        self.loss_idt_B = self.criterionIdt(self.idt_B, self.real_A) * lambda_idt
+        self.loss_idt_A = self.criterionIdt(self.idt_A, self.real_A) * lambda_idt
+        self.loss_idt_B = self.criterionIdt(self.idt_B, self.real_B) * lambda_idt
 
         # GAN loss D_A(G_A(A))
-        self.loss_G_A = self.criterionGAN(self.netD_A(self.fake_B), True)
+        self.loss_G_A = self.criterionGAN(self.netD_A(self.fake_A), True)  # TODO: check this line
         # GAN loss D_B(G_B(B))
-        self.loss_G_B = self.criterionGAN(self.netD_B(self.fake_A), True)
+        self.loss_G_B = self.criterionGAN(self.netD_B(self.fake_B), True)
+
         # Forward cycle loss || G_B(G_A(A)) - A||
         self.loss_cycle_A = self.criterionCycle(self.rec_A, self.real_A) * lambda_rec
         # Backward cycle loss || G_A(G_B(B)) - B||
@@ -193,10 +199,10 @@ class SiTTModel(BaseModel):
         self.loss_per_B = self.criterionPer(self.fake_A, self.real_B) * lambda_f
 
         #
-        self.loss_kl_A = self.criterionKL(F.log_softmax(self.texture_A_1[:, :, 0, 0], -1),
-                                          F.softmax(self.texture_A_2[:, :, 0, 0], -1)) * lambda_kl
-        self.loss_kl_B = self.criterionKL(F.log_softmax(self.texture_B_1[:, :, 0, 0], -1),
-                                          F.softmax(self.texture_B_2[:, :, 0, 0], -1)) * lambda_kl
+        self.loss_kl_A = self.criterionKL(F.log_softmax(self.texture_A_1.reshape(self.texture_A_1.shape[0], -1), -1),
+                                          F.softmax(self.texture_A_2.reshape(self.texture_A_2.shape[0], -1), -1)) * lambda_kl
+        self.loss_kl_B = self.criterionKL(F.log_softmax(self.texture_B_1.reshape(self.texture_B_1.shape[0], -1), -1),
+                                          F.softmax(self.texture_B_2.reshape(self.texture_B_2.shape[0], -1), -1)) * lambda_kl
         # combined loss and calculate gradients
         self.loss_G = (self.loss_G_A + self.loss_G_B + self.loss_cycle_A + self.loss_cycle_B +
                        self.loss_idt_A + self.loss_idt_B + self.loss_per_A + self.loss_per_B +

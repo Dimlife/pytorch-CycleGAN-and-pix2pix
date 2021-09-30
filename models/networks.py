@@ -1,3 +1,5 @@
+import copy
+
 import torch
 import torch.nn as nn
 from torch.nn import init
@@ -161,6 +163,8 @@ def define_G(input_nc, output_nc, ngf, netG, norm='batch', use_dropout=False, in
         net = UnetGenerator(input_nc, output_nc, 7, ngf, norm_layer=norm_layer, use_dropout=use_dropout)
     elif netG == 'unet_256':
         net = UnetGenerator(input_nc, output_nc, 8, ngf, norm_layer=norm_layer, use_dropout=use_dropout)
+    elif netG == 'unet_256_sitt':
+        net = UnetGeneratorSITT(input_nc, output_nc, 8, ngf, norm_layer=norm_layer, use_dropout=use_dropout)
     elif netG == 'sitt':
         net = SITT(input_nc, output_nc, max_f=128, num_b=7)
     else:
@@ -212,15 +216,16 @@ def define_D(input_nc, ndf, netD, n_layers_D=3, norm='batch', init_type='normal'
     return init_net(net, init_type, init_gain, gpu_ids)
 
 
-def positional_norm(x,eps=1e-6):
-    beta = torch.mean(x,dim=1,keepdim=True)
-    gamma = torch.sqrt(torch.mean((x - beta)**2,dim=1,keepdim=True) + eps)
+def positional_norm(x, eps=1e-6):
+    beta = torch.mean(x, dim=1, keepdim=True)
+    gamma = torch.sqrt(torch.mean((x - beta) ** 2, dim=1, keepdim=True) + eps)
     return gamma, beta
 
 
 def re_injection(x, skip, gamma, beta):
-    x = torch.cat([(gamma * x) + beta, skip],dim=1)
+    x = torch.cat([(gamma * x) + beta, skip], dim=1)
     return x
+
 
 ##############################################################################
 # Classes
@@ -244,8 +249,8 @@ class GANLoss(nn.Module):
         LSGAN needs no sigmoid. vanilla GANs will handle it with BCEWithLogitsLoss.
         """
         super(GANLoss, self).__init__()
-        self.register_buffer('real_label', torch.tensor(target_real_label))
-        self.register_buffer('fake_label', torch.tensor(target_fake_label))
+        # self.register_buffer('real_label', torch.tensor(target_real_label))
+        # self.register_buffer('fake_label', torch.tensor(target_fake_label))
         self.gan_mode = gan_mode
         if gan_mode == 'lsgan':
             self.loss = nn.MSELoss()
@@ -268,10 +273,12 @@ class GANLoss(nn.Module):
         """
 
         if target_is_real:
-            target_tensor = self.real_label
+            # target_tensor = self.real_label
+            target_tensor = torch.rand_like(prediction) / 10 + 0.9
         else:
-            target_tensor = self.fake_label
-        return target_tensor.expand_as(prediction)
+            # target_tensor = self.fake_label
+            target_tensor = torch.rand_like(prediction) / 10
+        return target_tensor
 
     def __call__(self, prediction, target_is_real):
         """Calculate loss given Discriminator's output and grount truth labels.
@@ -304,11 +311,93 @@ class VGGLoss(nn.Module):
         self.register_buffer("std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).cuda())
 
     def forward(self, input, target):
-        input = (input-self.mean) / self.std
-        target = (target-self.mean) / self.std
+        input = (input - self.mean) / self.std
+        target = (target - self.mean) / self.std
         input = self.block(input)
         target = self.block(target)
         return F.l1_loss(input, target)
+
+
+class GramLoss(nn.Module):
+    def __init__(self):
+        super(GramLoss, self).__init__()
+
+    def forward(self, input, target):
+        input = input.reshape(input.shape[0], input.shape[1], -1)
+        target = target.reshape(target.shape[0], target.shape[1], -1)
+        Gram
+        return F.l1_loss(input, target)
+
+"""
+slicing wasserstein loss from https://github.com/xchhuang/pytorch_sliced_wasserstein_loss/blob/main/pytorch/loss_fn.py
+"""
+
+class Slicing_torch(torch.nn.Module):
+    def __init__(self, device, layers, repeat_rate):
+        super().__init__()
+        # Number of directions
+        self.device = device
+        self.repeat_rate = repeat_rate
+        self.update_slices(layers)
+
+    def update_slices(self, layers):
+        directions = []
+        for l in layers:    # converted to [B, W, H, D]
+            if l.ndim == 4:
+                l = l.permute(0, 2, 3, 1)
+            if l.ndim == 5:
+                l = l.permute(0, 2, 3, 4, 1)
+
+            dim_slices = l.shape[-1]
+            num_slices = l.shape[-1]
+            # num_slices = 512
+            # print('num_slices:', num_slices, dim_slices)
+            cur_dir = torch.randn(size=(num_slices, dim_slices)).to(self.device)
+            norm = torch.sqrt(torch.sum(torch.square(cur_dir), axis=-1))
+            norm = norm.view(num_slices, 1)
+            cur_dir = cur_dir / norm
+            directions.append(cur_dir)
+        self.directions = directions
+        self.target = self.compute_target(layers)
+
+    def compute_proj(self, input, layer_idx, repeat_rate):
+        if input.ndim == 4:
+            input = input.permute(0, 2, 3, 1)
+        if input.ndim == 5:
+            input = input.permute(0, 2, 3, 4, 1)
+
+        batch = input.size(0)
+        dim = input.size(-1)
+        tensor = input.view(batch, -1, dim)
+        tensor_permute = tensor.permute(0, 2, 1)
+
+        # Project each pixel feature onto directions (batch dot product)
+        sliced = torch.matmul(self.directions[layer_idx], tensor_permute)
+        # print('sliced(torch):', sliced.shape, self.repeat_rate)
+
+        # # Sort projections for each direction
+        sliced, _ = torch.sort(sliced)
+        sliced = sliced.repeat_interleave(repeat_rate ** 2, dim=-1)
+        sliced = sliced.view(batch, -1)
+        return sliced
+
+    def compute_target(self, layers):
+        target = []
+        # target_sorted_sliced = []
+        for idx, l in enumerate(layers):
+            # target_sorted_sliced.append(l)
+            sliced_l = self.compute_proj(l, idx, self.repeat_rate)
+            target.append(sliced_l.detach())
+        return target
+
+    def forward(self, input):
+        loss = 0.0
+        # output = []
+        for idx, l in enumerate(input):
+            cur_l = self.compute_proj(l, idx, 1)
+            # output.append(l)
+            loss += F.mse_loss(cur_l, self.target[idx])
+        return loss
 
 
 def cal_gradient_penalty(netD, real_data, fake_data, device, type='mixed', constant=1.0, lambda_gp=10.0):
@@ -597,6 +686,165 @@ class Discriminator(nn.Module):
         x = self.encoder(x)
         x = self.last(x)
         return x
+
+
+class UnetGeneratorSITT(nn.Module):
+    """Create a Unet-based generator"""
+
+    def __init__(self, input_nc, output_nc, num_downs, ngf=64, norm_layer=nn.BatchNorm2d, use_dropout=False):
+        """Construct a Unet generator
+        Parameters:
+            input_nc (int)  -- the number of channels in input images
+            output_nc (int) -- the number of channels in output images
+            num_downs (int) -- the number of downsamplings in UNet. For example, # if |num_downs| == 7,
+                                image of size 128x128 will become of size 1x1 # at the bottleneck
+            ngf (int)       -- the number of filters in the last conv layer
+            norm_layer      -- normalization layer
+
+        We construct the U-Net from the innermost layer to the outermost layer.
+        It is a recursive process.
+        """
+        super(UnetGeneratorSITT, self).__init__()
+        # construct unet structure
+        unet_block = UnetSkipConnectionBlockSITT(ngf * 8, ngf * 8, input_nc=None, submodule=None,
+                                                 norm_layer=norm_layer,
+                                                 innermost=True)  # add the innermost layer
+        for i in range(num_downs - 5):  # add intermediate layers with ngf * 8 filters
+            unet_block = UnetSkipConnectionBlockSITT(ngf * 8, ngf * 8, input_nc=None, submodule=unet_block,
+                                                     norm_layer=norm_layer, use_dropout=use_dropout)
+        # gradually reduce the number of filters from ngf * 8 to ngf
+        unet_block = UnetSkipConnectionBlockSITT(ngf * 4, ngf * 8, input_nc=None, submodule=unet_block,
+                                                 norm_layer=norm_layer)
+        unet_block = UnetSkipConnectionBlockSITT(ngf * 2, ngf * 4, input_nc=None, submodule=unet_block,
+                                                 norm_layer=norm_layer)
+        unet_block = UnetSkipConnectionBlockSITT(ngf, ngf * 2, input_nc=None, submodule=unet_block,
+                                                 norm_layer=norm_layer)
+        self.model = UnetSkipConnectionBlockSITT(output_nc, ngf, input_nc=input_nc, submodule=unet_block,
+                                                 outermost=True,
+                                                 norm_layer=norm_layer)  # add the outermost layer
+
+    def texture(self, x):
+        return self.model.texture(x)
+
+    def forward(self, x, y, mode='a'):
+        """Standard forward"""
+        return self.model(x, y, mode)
+
+
+class CatModule(nn.Module):
+    def __init__(self):
+        super(CatModule, self).__init__()
+
+    def forward(self, x, y, _):
+        return torch.cat([x, y], dim=1)
+
+
+class UnetSkipConnectionBlockSITT(nn.Module):
+    """Defines the Unet submodule with skip connection.
+        X -------------------identity----------------------
+        |-- downsampling -- |submodule| -- upsampling --|
+    """
+
+    def __init__(self, outer_nc, inner_nc, input_nc=None,
+                 submodule=None, outermost=False, innermost=False, norm_layer=nn.BatchNorm2d, use_dropout=False):
+        """Construct a Unet submodule with skip connections.
+
+        Parameters:
+            outer_nc (int) -- the number of filters in the outer conv layer
+            inner_nc (int) -- the number of filters in the inner conv layer
+            input_nc (int) -- the number of channels in input images/features
+            submodule (UnetSkipConnectionBlock) -- previously defined submodules
+            outermost (bool)    -- if this module is the outermost module
+            innermost (bool)    -- if this module is the innermost module
+            norm_layer          -- normalization layer
+            use_dropout (bool)  -- if use dropout layers.
+        """
+        super(UnetSkipConnectionBlockSITT, self).__init__()
+        self.outermost = outermost
+        self.innermost = innermost
+
+        kernel_size = 6
+        stride = 2
+        padding = 2
+
+        if type(norm_layer) == functools.partial:
+            use_bias = norm_layer.func == nn.InstanceNorm2d
+        else:
+            use_bias = norm_layer == nn.InstanceNorm2d
+        if input_nc is None:
+            input_nc = outer_nc
+        downconv = nn.Conv2d(input_nc, inner_nc, kernel_size=kernel_size,
+                             stride=stride, padding=padding, bias=use_bias)
+        downrelu = nn.LeakyReLU(0.2, True)
+        downnorm = norm_layer(inner_nc)
+        uprelu = nn.ReLU(True)
+        upnorm = norm_layer(outer_nc)
+
+        if outermost:
+            upconv = nn.ConvTranspose2d(inner_nc * 2, outer_nc,
+                                        kernel_size=kernel_size, stride=stride,
+                                        padding=padding)
+            down = [downconv]
+            up = [uprelu, upconv, nn.Tanh()]
+            submodule = submodule
+        elif innermost:
+            upconv = nn.ConvTranspose2d(inner_nc * 2, outer_nc,
+                                        kernel_size=kernel_size, stride=stride,
+                                        padding=padding, bias=use_bias)
+            down = [downrelu, downconv]
+            up = [uprelu, upconv, upnorm]
+            submodule = CatModule()
+        else:
+            upconv = nn.ConvTranspose2d(inner_nc * 2, outer_nc,
+                                        kernel_size=kernel_size, stride=stride,
+                                        padding=padding, bias=use_bias)
+            down = [downrelu, downconv, downnorm]
+            up = [uprelu, upconv, upnorm]
+            submodule = submodule
+            if use_dropout:
+                up += [nn.Dropout(0.5)]
+
+        self.down_content = nn.Sequential(*down)
+        self.down_texture = copy.deepcopy(self.down_content)
+        self.submodule = submodule
+        self.up_a = nn.Sequential(*up)
+        self.up_b = copy.deepcopy(self.up_a)
+
+    def positional_norm(self, x, epsilon=1e-6):
+        mean = torch.mean(x, dim=1, keepdim=True)
+        var = torch.sqrt(torch.sqrt(torch.mean((x - mean) ** 2, dim=1, keepdim=True) + epsilon))
+        return mean, var
+
+    def inject(self, x, mean, var):
+        x = var * x + mean
+        return x
+
+    def texture(self, y):
+        y = self.down_texture(y)
+        if not self.innermost:
+            y = self.submodule.texture(y)
+        return y
+
+    def model(self, x, y, mode='a'):
+        # mean, var = self.positional_norm(x)
+        x = self.down_content(x)
+        y = self.down_texture(y)
+        if not self.innermost:
+            x = self.submodule(x, y, mode)
+        else:
+            x = torch.cat([x, y], dim=1)
+        if mode == 'a':
+            x = self.up_a(x)
+        else:
+            x = self.up_b(x)
+        # x = self.inject(x, mean, var)
+        return x
+
+    def forward(self, x, y, mode='a'):
+        if self.outermost:
+            return self.model(x, y, mode)
+        else:  # add skip connections
+            return torch.cat([x, self.model(x, y, mode)], 1)
 
 
 class UnetGenerator(nn.Module):
