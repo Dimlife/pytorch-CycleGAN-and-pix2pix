@@ -49,6 +49,7 @@ class SiTTModel(BaseModel):
             parser.add_argument('--lambda_rec', type=float, default=1.0, help='weight for cycle loss (A -> B -> A)')
             parser.add_argument('--lambda_kl', type=float, default=0.2, help='weight for cycle loss (A -> B -> A)')
             parser.add_argument('--lambda_f', type=float, default=1.0, help='weight for cycle loss (A -> B -> A)')
+            parser.add_argument('--lambda_gram', type=float, default=1.0, help='weight for cycle loss (A -> B -> A)')
 
         return parser
 
@@ -61,7 +62,7 @@ class SiTTModel(BaseModel):
         BaseModel.__init__(self, opt)
         # specify the training losses you want to print out. The training/test scripts will call <BaseModel.get_current_losses>
         self.loss_names = ['D_A', 'G_A', 'cycle_A', 'idt_A', 'D_B', 'G_B', 'cycle_B', 'idt_B',
-                           'per_A', 'per_B',  'kl_A', 'kl_B']
+                           'per_A', 'per_B']
         # specify the images you want to save/display. The training/test scripts will call <BaseModel.get_current_visuals>
         visual_names_A = ['real_A', 'fake_B', 'rec_A']
         visual_names_B = ['real_B', 'fake_A', 'rec_B']
@@ -99,6 +100,7 @@ class SiTTModel(BaseModel):
             # define loss functions
             self.criterionGAN = networks.GANLoss(opt.gan_mode).to(self.device)  # define GAN loss.
             self.criterionPer = networks.VGGLoss().to(self.device)
+            # self.criterionGram = networks.GramLoss().to(self.device)
             self.criterionCycle = torch.nn.L1Loss()
             self.criterionIdt = torch.nn.L1Loss()
             self.criterionKL = torch.nn.KLDivLoss(reduction='batchmean')
@@ -178,6 +180,7 @@ class SiTTModel(BaseModel):
         lambda_idt = self.opt.lambda_idt
         lambda_rec = self.opt.lambda_rec
         lambda_kl = self.opt.lambda_kl
+        lambda_gram = self.opt.lambda_gram
         lambda_f = self.opt.lambda_f
         # Identity loss
 
@@ -198,15 +201,19 @@ class SiTTModel(BaseModel):
         self.loss_per_A = self.criterionPer(self.fake_B, self.real_A) * lambda_f
         self.loss_per_B = self.criterionPer(self.fake_A, self.real_B) * lambda_f
 
-        #
-        self.loss_kl_A = self.criterionKL(F.log_softmax(self.texture_A_1.reshape(self.texture_A_1.shape[0], -1), -1),
-                                          F.softmax(self.texture_A_2.reshape(self.texture_A_2.shape[0], -1), -1)) * lambda_kl
-        self.loss_kl_B = self.criterionKL(F.log_softmax(self.texture_B_1.reshape(self.texture_B_1.shape[0], -1), -1),
-                                          F.softmax(self.texture_B_2.reshape(self.texture_B_2.shape[0], -1), -1)) * lambda_kl
+        # TODO: set texture to some matrices larger than 1 * 1
+        # print(self.texture_A_1.shape)
+        # print(self.texture_A_2.shape)
+        # self.loss_gram_A = self.criterionGram(self.texture_A_1, self.texture_A_2) * lambda_gram
+        # self.loss_gram_B = self.criterionGram(self.texture_B_1, self.texture_B_2) * lambda_gram
+
+        # self.loss_kl_A = self.criterionKL(F.log_softmax(self.texture_A_1.reshape(self.texture_A_1.shape[0], -1), -1),
+        #                                   F.softmax(self.texture_A_2.reshape(self.texture_A_2.shape[0], -1), -1)) * lambda_kl
+        # self.loss_kl_B = self.criterionKL(F.log_softmax(self.texture_B_1.reshape(self.texture_B_1.shape[0], -1), -1),
+        #                                   F.softmax(self.texture_B_2.reshape(self.texture_B_2.shape[0], -1), -1)) * lambda_kl
         # combined loss and calculate gradients
         self.loss_G = (self.loss_G_A + self.loss_G_B + self.loss_cycle_A + self.loss_cycle_B +
-                       self.loss_idt_A + self.loss_idt_B + self.loss_per_A + self.loss_per_B +
-                       self.loss_kl_A + self.loss_kl_B)
+                       self.loss_idt_A + self.loss_idt_B + self.loss_per_A + self.loss_per_B )
 
         self.loss_G.backward()
 
